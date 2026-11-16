@@ -1,0 +1,49 @@
+# Simulating load and autoscaling for cloud services
+
+## Introduction
+When it comes to running a service in the cloud, there are two common models - server and serverless. Notable examples are Kubernetes and AWS Lambda respectively. Both are used in our company and have their pros and cons. In this article I will focus on one problem specific to the server model - autoscaling. In the server model you request virtual machines (VMs) and deploy your service. You pay for the time VMs are in use. Ideally, you want to have just enough VMs to serve the incoming traffic, so you don't overpay. But when a service runs 24/7, the traffic changes significantly during the day.
+VMs can be launched or terminated with an API calls to AWS and it takes about 2 minutes to launch or terminate a VM. This allows to dynamically adjust the number of VM in use. We can have a process that periodically gathers metrics about the service and sets the number of VMs to match the incoming traffic. This is called autoscaling. AWS provides some options for autoscaling and so does kubernetes. But it's up to the user to decide on the actual solution.
+This task is not trivial because launching and terminating VMs is not free - it takes time. If you launch a VM you want to make use of it. On the other hand, the amount of traffic is very noisy. There are global changes in trend but also random fluctuations.
+We might want to evaluate the performance of our autoscaling solution. For that we'd need to apply some traffic to our service and see how it behaves. To be representative, this testing session might last a few hours. It is ok for the final testing, but too long if we are just trying different options. It would be useful to first run some kind of simulation to select the best option and then run the actual test.
+In this article, I'll show a method for generating a noisy traffic of any shape. Which is useful for both - real testing and simulation. And I will show simulated results of simplified service model and simple autoscaling solution. From now on, we will consider the abstact model and I will be using the term "worker" instead of VM. Below diagrams show a general view and worker lifecycle.
+[intro1_system_description][intro2_worker_lifecycle]
+
+## Method for generating workload
+If we want to test our autoscaling solution either in real life or simulation if need to first come up with some workload. By that I mean rates at which the tasks arrive to the service.
+In this article I will assume that tasks are independent. For example, this excludes the case when the client sends a sequense of tasks. However, below considerations can still be applied to generating workload for the first tasks of a sequence.
+The simplest way of generating a workload is to send one task every x seconds. But real life workloads are more random then that. Also average rates change over time. How to take this into account?
+First let's better define what we want. Assume we have a client that accepts the list of timestamps and can send tasks at this timestamps. For example, to send one task every 6 seconds, our input timestamps would be [0, 6, 12, ...]. This form lets us to define any workload. We want a method to generate timestamps for any desired workload.
+I suggest the following. Define desired workload shape by a function which accepts time in minutes and returns the desired average task per minute at this time. Consider this function as probability density function, normalize it and draw N samples from it. Sort this list of N samples and we get our list of timestamps. The N equal to the area under graph of workload shape function. The resulting timestamps are in minutes. Convert to seconds if needed.
+For example to generate workload of 10 tasks per minute, we would use the constant function equal to 10. But we can use any function, for example below plot also shows a workload generated from sine squared function.
+[load_generation]
+
+## Evaluating autoscaling performance
+To compare autoscaling policies, I run simulations on the same set of workloads and compute metrics about system performance.
+Here is my reasoning for choosing the workload set:
+* Constant, high rate workload. The idea is to check that the system can react to sudden change and then stabilize.
+* Gradually raising and falling workload rate. The idea is to check that the system can adapt to constantly changing rates.
+
+And here are the performance metrics I used:
+* Worker utilization. Which is the time workers were busy divided by the total worker life time. Higher is better. It means lower cost to handle the same workload.
+* Average task wait time. Average time tasks spent in queue before taken in progress. Lower is better. It means faster response times.
+
+Improving one metric is likely to make the other worse. It is handy if autoscaling policy has an intuitive parameter to configure this trade off.
+
+## How simulation is done in this article?
+The simulation is done entirely on a user's machine and all logic is defined by python script. I don't simulate CPU utilization, on picking up a task worker just becomes busy for a certain amount of time.
+As a result of simulation we want to be able to compute metrics mentioned in the above section.
+Here are some details about the system configuration:
+* Autoscaler policy is invoked every 60 seconds.
+* Mean worker launch and termination times are 90 sec, variance 10 sec.
+* Mean task duration is 40 sec, variance 9 sec.
+
+## Evaluating "Tasks per worker" policy
+The policy I'll be using is a simplified version of AWS solution - [Scaling based on Amazon SQS](https://docs.aws.amazon.com/autoscaling/ec2/userguide/as-using-sqs-queue.html). The idea is to maintain the number of workers such there is a certain amout of tasks per each worker.
+I assume AWS uses some advanced target tracking method. But I instead will just use this formula:
+$$DesiredNumberOfWorkers = \lceil\dfrac{QueueLength}{TasksPerWorker}\rceil$$
+It will be executed every minute, and this is how we will try to maintain the desired tasks per worker ratio.
+TasksPerWorker parameter can be tuned to control worker utilization and task wait time. For example, increasing TasksPerWorker should lead to higher utilization but also to higher wait time.
+Below plots show the results of simulation for two different values of TasksPerWorker parameter. The first value is selected for high utilization, the second - is selected for low wait times.
+
+## Conclusions
+I explained the motivation for autoscaling simulation. Proposed a method for generating random workloads of any shape, which can be used for evaluation of autoscaling policies. Proposed metrics for scoring autoscaling performance - utilization and wait time. I considered a simple case of a service with one worker per node and evaluated this system with simple autoscaling policy. The results should give some intuition about the system's behavior and maybe inspire ideas in someone who maintains their own service.
